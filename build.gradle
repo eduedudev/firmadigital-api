@@ -1,0 +1,68 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '4.0.1'
+	id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'ec.gob.defensoria'
+version = '0.0.8'
+description = 'API REST para firma digital de documentos'
+
+java {
+	toolchain {
+		languageVersion = JavaLanguageVersion.of(21)
+	}
+}
+
+configurations {
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+	// Excluir conflictos de logging entre Spring Boot y librería firmadigital
+	all {
+		exclude group: 'org.slf4j', module: 'slf4j-reload4j'
+		exclude group: 'ch.qos.reload4j', module: 'reload4j'
+	}
+}
+
+repositories {
+	mavenLocal()
+	mavenCentral()
+	// Repositorio para librería FirmaDigital
+	maven { url 'https://jitpack.io' }
+	// Repositorio DSS para XAdES
+	maven {
+		url 'https://ec.europa.eu/digital-building-blocks/artifact/content/repositories/esignaturedss'
+	}
+}
+
+dependencies {
+	// Spring Boot
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	
+	// Librería FirmaDigital Ecuador
+	implementation 'ec.gob.firmadigital:libreria:5.0.0-SNAPSHOT'
+	
+	// Swagger/OpenAPI para documentación de API (versión compatible con Spring Boot 4.x)
+	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.4'
+	
+	// Lombok para reducir boilerplate
+	compileOnly 'org.projectlombok:lombok'
+	annotationProcessor 'org.projectlombok:lombok'
+	
+	// Testing
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
+
+task buildLibrary(type: Exec) {
+	workingDir 'firmadigital-libreria'
+	commandLine 'mvn', 'install', '-DskipTests', '-q'
+}
+
+compileJava.dependsOn buildLibrary

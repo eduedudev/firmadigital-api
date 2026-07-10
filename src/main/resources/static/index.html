@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Firma Digital</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#f5f5f5;color:#333}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+h1{font-size:1.5rem;margin-bottom:20px}
+.two-col{display:grid;grid-template-columns:1fr 300px;gap:20px}
+.panel{background:#fff;border-radius:8px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.panel h2{font-size:1rem;margin-bottom:12px}
+label{display:block;font-size:.85rem;font-weight:600;margin-top:12px;margin-bottom:4px}
+input[type=file],input[type=password]{width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:.85rem}
+#pdf-wrap{position:relative;min-height:500px;background:#e0e0e0;border-radius:4px;overflow:auto;cursor:crosshair;display:flex;justify-content:center}
+#pdf-wrap .empty{display:flex;align-items:center;justify-content:center;height:500px;color:#888;font-size:.9rem;cursor:default;width:100%}
+#pdf-wrap canvas{display:block}
+.pdf-controls{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+.pdf-controls button{padding:6px 14px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;font-size:.85rem}
+.pdf-controls button:hover{background:#eee}
+.pdf-controls button:disabled{opacity:.4;cursor:default}
+.pdf-controls .page-info{font-size:.85rem;color:#555}
+.stamp-guide{position:absolute;pointer-events:none;z-index:10;display:none}
+.stamp-guide img{display:block;width:100%;height:100%;object-fit:contain;opacity:.8;border:1px solid #2563eb;border-radius:2px;background:#fff}
+.stamp-guide.show{display:block}
+.btn{width:100%;padding:10px;border:none;border-radius:4px;font-size:.9rem;font-weight:600;cursor:pointer;margin-top:16px}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-primary:disabled{background:#93c5fd;cursor:not-allowed}
+#status{margin-top:12px;padding:10px;border-radius:4px;font-size:.85rem;display:none}
+#status.info{display:block;background:#dbeafe;color:#1e40af}
+#status.error{display:block;background:#fee2e2;color:#991b1b}
+#status.success{display:block;background:#dcfce7;color:#166534}
+.hint{font-size:.8rem;color:#666;margin-top:6px}
+@media(max-width:768px){.two-col{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class=container>
+<h1>🔏 Firma Digital de Documentos</h1>
+<div class=two-col>
+<div class=panel style=grid-column:1>
+<h2>Documento</h2>
+<input type=file id=pdfInput accept=.pdf>
+<div id=pdf-wrap><div class=empty>Sube un PDF para previsualizar</div></div>
+<div class=pdf-controls id=pdfControls style=display:none>
+<button id=prevPage disabled>◀ Anterior</button>
+<span class=page-info>Página <span id=pageNum>1</span> de <span id=totalPages>0</span></span>
+<button id=nextPage disabled>Siguiente ▶</button>
+</div>
+<p class=hint>Haz clic sobre el PDF para colocar la firma.</p>
+</div>
+<div class=panel style=grid-column:2>
+<h2>Certificado</h2>
+<label>Archivo .p12</label>
+<input type=file id=certInput accept=.p12,.pfx>
+<label>Contraseña</label>
+<input type=password id=certPass placeholder="Contraseña del certificado">
+<p style=margin-top:16px;font-size:.85rem;color:#666>Haz clic en el PDF para posicionar la firma, luego presiona Firmar.</p>
+<button class="btn btn-primary" id=signBtn disabled>Firmar documento</button>
+<div id=status></div>
+</div>
+</div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+const pdfInput = document.getElementById('pdfInput');
+const pdfWrap = document.getElementById('pdf-wrap');
+const signBtn = document.getElementById('signBtn');
+const statusEl = document.getElementById('status');
+const prevBtn = document.getElementById('prevPage');
+const nextBtn = document.getElementById('nextPage');
+const pageNumSpan = document.getElementById('pageNum');
+const totalPagesSpan = document.getElementById('totalPages');
+const pdfControls = document.getElementById('pdfControls');
+
+const STAMP_W = 110;
+const STAMP_H = 36;
+const RENDER_SCALE = 1.2;
+
+let pdfBytes = null;
+let pdfFileName = '';
+let pdfDoc = null;
+let currentPage = 1;
+let canvas = null;
+let ctx = null;
+let guideEl = null;
+let sig = null;
+let pageHeight = 0;
+let pageWidth = 0;
+let renderScale = RENDER_SCALE;
+
+function showStatus(msg, type) {
+  statusEl.textContent = msg;
+  statusEl.className = type || '';
+  if (!type) statusEl.style.display = 'none';
+  else statusEl.style.display = 'block';
+}
+
+function updateSignBtn() {
+  signBtn.disabled = !sig || !pdfBytes;
+}
+
+function clearSig() {
+  if (guideEl) guideEl.classList.remove('show');
+  sig = null;
+  updateSignBtn();
+}
+
+function buildGuide() {
+  guideEl = document.createElement('div');
+  guideEl.className = 'stamp-guide';
+  const img = document.createElement('img');
+  img.src = 'LogoFirmaEC.png';
+  img.alt = 'Sello de firma';
+  guideEl.appendChild(img);
+  pdfWrap.appendChild(guideEl);
+}
+
+async function renderPage(pageNum) {
+  if (!pdfDoc) return;
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale: RENDER_SCALE });
+  pageWidth = viewport.width;
+  pageHeight = viewport.height;
+  renderScale = RENDER_SCALE;
+
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.style.boxShadow = '0 2px 8px rgba(0,0,0,.15)';
+    pdfWrap.innerHTML = '';
+    pdfWrap.appendChild(canvas);
+    buildGuide();
+  }
+
+  const outputScale = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(viewport.width * outputScale);
+  canvas.height = Math.floor(viewport.height * outputScale);
+  canvas.style.width = Math.floor(viewport.width) + 'px';
+  canvas.style.height = Math.floor(viewport.height) + 'px';
+
+  ctx = canvas.getContext('2d');
+  ctx.scale(outputScale, outputScale);
+
+  const renderCtx = {
+    canvasContext: ctx,
+    viewport: viewport
+  };
+  await page.render(renderCtx).promise;
+  clearSig();
+  pageNumSpan.textContent = pageNum;
+  prevBtn.disabled = pageNum <= 1;
+  nextBtn.disabled = pageNum >= pdfDoc.numPages;
+}
+
+async function loadPdf(data) {
+  pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+  totalPagesSpan.textContent = pdfDoc.numPages;
+  pdfControls.style.display = 'flex';
+  currentPage = 1;
+  await renderPage(currentPage);
+}
+
+canvas && canvas.addEventListener('click', function(e) {
+  // handled via pdfWrap click
+});
+
+pdfWrap.addEventListener('click', function(e) {
+  if (!canvas || e.target.closest('.stamp-guide')) return;
+  const wrapRect = pdfWrap.getBoundingClientRect();
+  const canvasRect = canvas.getBoundingClientRect();
+  const cx = e.clientX - wrapRect.left;
+  const cy = e.clientY - wrapRect.top;
+  const canvasX = e.clientX - canvasRect.left;
+  const canvasY = e.clientY - canvasRect.top;
+  if (canvasX < 0 || canvasX > canvasRect.width || canvasY < 0 || canvasY > canvasRect.height) return;
+
+  const pdfX = Math.round(canvasX / renderScale);
+  const pdfY = Math.round(pageHeight / renderScale - canvasY / renderScale);
+
+  const GUIDE_MULT = 1;
+  sig = { pdfX, pdfY, x: pdfX, y: pdfY };
+  const iconW = Math.round(STAMP_W * renderScale * GUIDE_MULT);
+  const iconH = Math.round(STAMP_H * renderScale * GUIDE_MULT);
+  guideEl.style.left = cx + 'px';
+  guideEl.style.top = cy + 'px';
+  guideEl.style.width = iconW + 'px';
+  guideEl.style.height = iconH + 'px';
+  guideEl.classList.add('show');
+  updateSignBtn();
+});
+
+prevBtn.addEventListener('click', () => {
+  if (currentPage > 1) { currentPage--; renderPage(currentPage); }
+});
+
+nextBtn.addEventListener('click', () => {
+  if (currentPage < pdfDoc.numPages) { currentPage++; renderPage(currentPage); }
+});
+
+pdfInput.addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  pdfFileName = file.name;
+  const reader = new FileReader();
+  reader.onload = async function(ev) {
+    try {
+      const src = new Uint8Array(ev.target.result);
+      pdfBytes = new Uint8Array(src);
+      pdfWrap.innerHTML = '<div class=empty>Cargando PDF…</div>';
+      await loadPdf(src);
+      showStatus('', '');
+    } catch(err) {
+      showStatus('Error al leer PDF: ' + err.message, 'error');
+    }
+  };
+  reader.onerror = () => showStatus('Error al leer el archivo', 'error');
+  reader.readAsArrayBuffer(file);
+});
+
+function toBase64(u8) {
+  let bin = '';
+  for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+  return btoa(bin);
+}
+
+signBtn.addEventListener('click', async function() {
+  const certFile = document.getElementById('certInput').files[0];
+  const password = document.getElementById('certPass').value;
+  if (!certFile || !password) { showStatus('Selecciona un certificado .p12 y escribe la contraseña', 'error'); return; }
+  if (!sig) { showStatus('Haz clic en el PDF para posicionar la firma', 'error'); return; }
+
+  signBtn.disabled = true;
+  signBtn.textContent = 'Firmando...';
+
+  try {
+    const certArr = await certFile.arrayBuffer();
+    const certBase64 = toBase64(new Uint8Array(certArr));
+    const docBase64 = toBase64(pdfBytes);
+    if (!docBase64) { throw new Error('No se pudo leer el PDF'); }
+    const body = {
+      document: docBase64,
+      certificate: certBase64,
+      password: password,
+      documentName: pdfFileName,
+      configuration: {
+        visibleSignature: true,
+        page: currentPage,
+        position: { x: sig.x, y: sig.y, width: STAMP_W, height: STAMP_H }
+      }
+    };
+
+    showStatus('Firmando documento...', 'info');
+    const res = await fetch('/api/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error(await res.text());
+
+    const json = await res.json();
+    const signedBytes = Uint8Array.from(atob(json.signedDocument), c => c.charCodeAt(0));
+    const blob = new Blob([signedBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = pdfFileName.replace(/\.pdf$/i, '') + '-signed.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+
+    showStatus('PDF firmado correctamente', 'success');
+  } catch(err) {
+    showStatus('Error: ' + err.message, 'error');
+  } finally {
+    signBtn.disabled = false;
+    signBtn.textContent = 'Firmar documento';
+  }
+});
+</script>
+</body>
+</html>

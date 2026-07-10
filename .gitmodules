@@ -1,0 +1,4 @@
+[submodule "firmadigital-libreria"]
+	path = firmadigital-libreria
+	url = https://minka.gob.ec/mintel/ge/firmaec/firmadigital-libreria.git
+
